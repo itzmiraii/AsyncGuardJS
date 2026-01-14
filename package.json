@@ -1,0 +1,22 @@
+{
+  "name": "async-guard-js",
+  "version": "1.6.0",
+  "description": "",
+  "keywords": [
+    "async",
+    "guardjs",
+    "metrics"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "none"
+  },
+  "license": "LICENSE",
+  "author": "itzmimi",
+  "type": "module",
+  "main": "./src/AsyncGuardJS.js",
+  "types": "./src/AsyncGuardTS.d.ts",
+  "scripts": {
+    "test": "none"
+  }
+}
