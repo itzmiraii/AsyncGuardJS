@@ -1,7 +1,7 @@
 {
   "name": "async-guard-js",
   "version": "1.6.0",
-  "description": "",
+  "description": "AsyncGuardJS | Safely run async tasks with retries, timeouts, backoff & circuit breaker + fallback support ;)",
   "keywords": [
     "async",
     "guardjs",
@@ -9,7 +9,7 @@
   ],
   "repository": {
     "type": "git",
-    "url": "none"
+    "url": "https://github.com/itzmiraii/AsyncGuardJS/tree/main"
   },
   "license": "LICENSE",
   "author": "itzmimi",
