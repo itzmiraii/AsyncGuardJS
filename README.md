@@ -1,16 +1,20 @@
 # Async-Guard-JS
-### If there's any issues, please email me at xamenia.officialhd@gmail.com
+
+### If there's any issues, please email me at <xamenia.officialhd@gmail.com>
 
 ---
 [![NPM](https://nodei.co/npm/async-guard-js.svg?style=flat-square&data=n,v,u,d,s)](https://nodei.co/npm/async-guard-js/)
 
 Use [npm](https://www.npmjs.com/) To Install
-```
+
+```js
 npm install async-guard-js
 ```
+
 ---
 
 ## Quick Start
+
 ```js
 import AsyncGuardJS from "./src/AsyncGuardJS.js";
 
@@ -34,7 +38,9 @@ console.log(result);
 ```
 
 ---
+
 ## Features
+
 - Automatic retries
 - Timeout control
 - Exponential backoff
@@ -44,10 +50,13 @@ console.log(result);
 - Built-in metrics & monitoring
 - Zero-dependency
 - TS Support
+
 ---
 
 ## Basic Usage
+
 Simple Retry
+
 ```js
 import AsyncGuardJS from "./src/AsyncGuardJS.js";
 
@@ -93,8 +102,11 @@ try {
 ```
 
 ---
+
 ## Circuit Breaker (NEW)
+
 Prevent hammering failling services by automatically "opening" the circuit after too many failures
+
 ```js
 await AsyncGuardJS.run(call_payment_api, {
     retries: 2,
@@ -116,11 +128,15 @@ console.log(status);
 // Manual Reset
 AsyncGuardJS.reset_circuit("payment-service");
 ```
+
 ---
 
 ---
+
 ## Fallback Mechanism
+
 Provide a graceful fallback when all retries are exhausted:
+
 ```js
 // Static Fallback Value
 const user = await AsyncGuardJS.run(fetch_user, {
@@ -148,17 +164,21 @@ const latest = await AsyncGuardJS.run(fetch_latest, {
 ```
 
 ### **When is fallback used ?**
+
 - All retries exhausted
 - Circuit breaker is open
 - Operation aborted
 - Any terminal failure
 
 **Fallback Metrics:**
+
 - `asyncguardjs.fallback.used` ~ Successful fallback invocations
 - `asyncguardjs.fallback.failed` ~ Fallback function threw error
+
 ---
 
 ## Metrics & Monitoring (Experimental)
+
 AsyncGuardJS exposes lightweifht, built-in metrics to help you understand
 retries, failures, latency and circuit breaker behaviors in production.
 Metrics are **optional**, **dependency-free**, and **disabled by default unless read**
@@ -166,18 +186,25 @@ Metrics are **optional**, **dependency-free**, and **disabled by default unless 
 > **Note:** This API is experimental and may change in future versions.
 
 ### What is collected
+
 #### Counters
+
 - `asyncguardjs.attempt` ~ Total execution attempts
 - `asyncguardjs.retry` ~ Number of retries performed
 - `asyncguardjs.failure` ~ Failed attempts (including aborted execs)
 - `asyncguardjs.circuit.open` ~ Circuit breaker opened events
 - `asyncguardjs.circuit.recovered` ~ Circuit breaker recovery events
+
 #### Timers
+
 - `asyncguardjs.task.duration_ms` ~ Execution duration of successful tasks (ms)
 
 ---
+
 ### Reading Metrics
+
 Metrics are stored in-memory and can be accessed at any time:
+
 ```js
 const metrics = AsyncGuardJS.get_metrics();
 
@@ -197,16 +224,21 @@ console.log(metrics.timers);
 }
 */
 ```
+
 ---
 
 ---
+
 ### Reseting Metrics
+
 ```js
 AsyncGuardJS.reset_metrics();
 ```
+
 ---
 
 ### States
+
 - `CLOSED` ~ Normal Operation
 - `OPEN` ~ Too many failures, immediate rejection
 - `HALF_OPEN` ~ testing if recovered
