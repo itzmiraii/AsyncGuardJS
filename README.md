@@ -2,8 +2,7 @@
 ### If there's any issues, please email me at xamenia.officialhd@gmail.com
 
 ---
-[![npm version](https://img.shields.io/npm/v/async-guard-js.svg)](https://www.npmjs.com/package/async-guard-js)
-[![Downloads/month](https://img.shields.io/npm/dm/async-guard-js.svg)]
+[![NPM](https://nodei.co/npm/async-guard-js.svg?style=flat-square&data=n,v,u,d,s)](https://nodei.co/npm/async-guard-js/)
 
 Use [npm](https://www.npmjs.com/) To Install
 ```
