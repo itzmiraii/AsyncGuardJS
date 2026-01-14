@@ -50,7 +50,7 @@ console.log(result);
 ## Basic Usage
 Simple Retry
 ```js
-import AsyncGuardJS from "async-guard-js";
+import AsyncGuardJS from "./src/AsyncGuardJS.js";
 
 let attempt_count = 0;
 
