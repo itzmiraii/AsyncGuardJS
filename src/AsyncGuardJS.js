@@ -1,9 +1,25 @@
+/**
+ * 15/01/2026
+ * 
+ * Made By ItzMiMi (DC: 844900332303024128)
+*/
+
 export class AsyncGuardJS extends Error {
     constructor(message, meta = {}) {
         super(message);
-
         this.name = "AsyncGuardJS";
-        Object.assign(this, meta);
+
+        if (meta && typeof meta === "object" && !Array.isArray(meta)) {
+            const safe_keys = Object.keys(meta).filter(key =>
+                key !== "__proto__" &&
+                key !== "constructor" &&
+                key !== "prototype"
+            );
+
+            for (const key of safe_keys) {
+                this[key] = meta[key];
+            }
+        }
     }
 
     /**
@@ -29,374 +45,422 @@ export class AsyncGuardJS extends Error {
      * @param {number} [options.rate_limit.max_requests] Max Requests Allowed In Window.
      * @param {number} [options.rate_limit.window_ms] Time Window For Rate Limiting (MS).
      * @param {number} [options.rate_limit.queue=false] Queue Requests When Limit Hit (Default: Throw Error).
+     * @param {number} [options.rate_limit.queue_max_wait_ms=30000] Max MS To Wait In Queue Before Throwing (Prevents Hangs).
+     * 
+     * Note: Queuing Uses Time-Based Waiting + Jitter To Reduce Thundering Herd.
     */
 
     static _has_performance = typeof performance !== "undefined" && typeof performance.now === "function";
+    static _active_operations = 0;
+    static _max_concurrent_operations = 100;
 
     static async run(task, options = {}) {
         if (typeof task !== "function") {
             throw new TypeError("[!] [AsyncGuardJS] Task Must Be A Function !");
         }
 
-        const retries = Math.max(0, Math.min(50, Number(options.retries) || 0));
-        const timeout = Math.max(0, Number(options.timeout) || 0);
-        const max_backoff = Math.max(0, Number(options.max_backoff) || 5000);
-
-        const {
-            retry_if = () => true,
-            backoff = (attempt) => Math.min(5000, 100 * 2 ** (attempt - 1)),
-            signal,
-            circuit_breaker,
-            rate_limit,
-            fallback
-        } = options;
-
-        if (typeof backoff !== "function") {
-            throw new TypeError("[!] [AsyncGuardJS] Backoff Must Be A Function !");
+        if (this._active_operations >= this._max_concurrent_operations) {
+            throw new AsyncGuardJS(
+                "[!] [AsyncGuardJS] Maximum Concurrent Operations Exceeded.",
+                { active_operations: this._active_operations }
+            );
         }
 
-        if (circuit_breaker) {
-            if (typeof circuit_breaker !== "object") {
-                throw new TypeError("[!] [AsyncGuardJS] Circuit Breaker Configuration Must Be An Object !");
+        this._active_operations++;
+
+        const parse_safe_number = (value, fallback, min = 0, max = Infinity) => {
+            const num = Number(value);
+
+            if (!Number.isFinite(num) || num < min || num > max) {
+                return fallback;
             }
 
-            if (circuit_breaker.threshold !== undefined &&
-                (!Number.isInteger(circuit_breaker.threshold) || circuit_breaker.threshold < 1)) {
-                throw new TypeError("[!] [AsyncGuardJS] Circuit Breaker Threshold Must Be A Positive Integer !");
-            }
-
-            if (this._is_circuit_open(circuit_breaker)) {
-                throw new AsyncGuardJS(
-                    "[!] [AsyncGuardJS] Circuit Breaker Is 'OPEN' | Too Many Recent Failures.",
-                    { circuit_state: "OPEN", attempt: 0 }
-                );
-            }
+            return Math.floor(num);
         }
 
-        if (rate_limit) {
-            if (typeof rate_limit !== "object") {
-                throw new TypeError("[!] [AsyncGuardJS] Rate Limit Configuration Must Be An Object !");
+        try {
+            const retries = parse_safe_number(options.retries, 0, 0, 50);
+            const timeout = parse_safe_number(options.timeout, 0, 0, 300000);
+            const max_backoff = parse_safe_number(options.max_backoff, 5000, 0, 60000);
+
+            const {
+                retry_if = () => true,
+                backoff = (attempt) => Math.min(5000, 100 * 2 ** (attempt - 1)),
+                signal,
+                circuit_breaker,
+                rate_limit,
+                fallback
+            } = options;
+
+            if (typeof backoff !== "function") {
+                throw new TypeError("[!] [AsyncGuardJS] Backoff Must Be A Function !");
             }
 
-            if (!Number.isInteger(rate_limit.max_requests) || rate_limit.max_requests < 1) {
-                throw new TypeError("[!] [AsyncGuardJS] Rate Limit 'max_requests' Must Be A Positive Integer !");
-            }
-
-            if (!Number.isInteger(rate_limit.window_ms) || rate_limit.window_ms < 1) {
-                throw new TypeError("[!] [AsyncGuardJS] Rate Limit 'window_ms' Must Be A Positive Integer !");
-            }
-
-            while (true) {
-                if (this._can_proceed_rate_limit(rate_limit)) {
-                    this._register_rate_limit_request(rate_limit);
-                    break;
+            if (circuit_breaker) {
+                if (typeof circuit_breaker !== "object") {
+                    throw new TypeError("[!] [AsyncGuardJS] Circuit Breaker Configuration Must Be An Object !");
                 }
 
-                await this._wait_for_rate_limit(rate_limit, signal);
-            }
-        }
+                if (circuit_breaker.threshold !== undefined &&
+                    (!Number.isInteger(circuit_breaker.threshold) || circuit_breaker.threshold < 1)) {
+                    throw new TypeError("[!] [AsyncGuardJS] Circuit Breaker Threshold Must Be A Positive Integer !");
+                }
 
-        const wait_with_abort = (ms, context) => {
-            return new Promise((resolve, reject) => {
-                const { signal, attempt } = context;
+                if (circuit_breaker.window !== undefined &&
+                    (!Number.isInteger(circuit_breaker.window) || circuit_breaker.window < 1000)) {
+                    throw new TypeError("[!] [AsyncGuardJS] Circuit Breaker Window Must Be At Least 1000MS !");
+                }
 
-                if (signal?.aborted) {
-                    return reject(
-                        new AsyncGuardJS(
-                            "[!] [AsyncGuardJS] Operation Aborted During Backoff.",
-                            { attempt }
-                        )
+                if (circuit_breaker.recovery !== undefined &&
+                    (!Number.isInteger(circuit_breaker.recovery) || circuit_breaker.recovery < 1000)) {
+                    throw new TypeError("[!] [AsyncGuardJS] Circuit Breaker Recovery Must Be At Least 1000MS !");
+                }
+
+                if (this._is_circuit_open(circuit_breaker)) {
+                    throw new AsyncGuardJS(
+                        "[!] [AsyncGuardJS] Circuit Breaker Is 'OPEN' | Too Many Recent Failures.",
+                        { circuit_state: "OPEN", attempt: 0 }
                     );
                 }
+            }
 
-                const timeout_id = setTimeout(resolve, ms);
+            if (rate_limit) {
+                if (typeof rate_limit !== "object") {
+                    throw new TypeError("[!] [AsyncGuardJS] Rate Limit Configuration Must Be An Object !");
+                }
 
-                if (signal) {
-                    const abort_listener = () => {
-                        clearTimeout(timeout_id);
+                if (!Number.isInteger(rate_limit.max_requests) || rate_limit.max_requests < 1) {
+                    throw new TypeError("[!] [AsyncGuardJS] Rate Limit 'max_requests' Must Be A Positive Integer !");
+                }
 
-                        reject(
+                if (!Number.isInteger(rate_limit.window_ms) || rate_limit.window_ms < 1) {
+                    throw new TypeError("[!] [AsyncGuardJS] Rate Limit 'window_ms' Must Be A Positive Integer !");
+                }
+
+                while (true) {
+                    if (this._can_proceed_rate_limit(rate_limit)) {
+                        this._register_rate_limit_request(rate_limit);
+                        break;
+                    }
+
+                    await this._wait_for_rate_limit(rate_limit, signal);
+                }
+            }
+
+            const wait_with_abort = (ms, context) => {
+                return new Promise((resolve, reject) => {
+                    const { signal, attempt } = context;
+
+                    if (signal?.aborted) {
+                        return reject(
                             new AsyncGuardJS(
                                 "[!] [AsyncGuardJS] Operation Aborted During Backoff.",
                                 { attempt }
                             )
                         );
+                    }
+
+                    const timeout_id = setTimeout(resolve, ms);
+
+                    if (signal) {
+                        const abort_listener = () => {
+                            clearTimeout(timeout_id);
+
+                            reject(
+                                new AsyncGuardJS(
+                                    "[!] [AsyncGuardJS] Operation Aborted During Backoff.",
+                                    { attempt }
+                                )
+                            );
+                        };
+
+                        signal.addEventListener("abort", abort_listener, { once: true });
+                    }
+                });
+            };
+
+            const enforce_abort = (promise, signal, attempt) => {
+                if (!signal) {
+                    return promise;
+                }
+
+                if (signal.aborted) {
+                    return Promise.reject(
+                        new AsyncGuardJS(
+                            "[!] [AsyncGuardJS] Task Started After Abort.",
+                            { attempt }
+                        )
+                    );
+                }
+
+                return new Promise((resolve, reject) => {
+                    let settled = false;
+                    const controller = new AbortController();
+
+                    const abort_listener = () => {
+                        if (!settled) {
+                            settled = true;
+
+                            reject(
+                                new AsyncGuardJS(
+                                    "[!] [AsyncGuardJS] Operation Aborted During Task Execution",
+                                    { attempt }
+                                )
+                            );
+                        }
                     };
 
                     signal.addEventListener("abort", abort_listener, { once: true });
-                }
-            });
-        };
 
-        const enforce_abort = (promise, signal, attempt) => {
-            if (!signal) {
-                return promise;
-            }
-
-            if (signal.aborted) {
-                return Promise.reject(
-                    new AsyncGuardJS(
-                        "[!] [AsyncGuardJS] Task Started After Abort.",
-                        { attempt }
-                    )
-                );
-            }
-
-            return new Promise((resolve, reject) => {
-                let settled = false;
-
-                const abort_listener = () => {
-                    if (!settled) {
-                        settled = true;
-
-                        reject(
-                            new AsyncGuardJS(
-                                "[!] [AsyncGuardJS] Operation Aborted During Task Execution",
-                                { attempt }
-                            )
-                        );
-                    }
-                };
-
-                signal.addEventListener("abort", abort_listener, { once: true });
-
-                promise.then(
-                    (value) => {
+                    const timeout = setTimeout(() => {
                         if (!settled) {
-                            settled = true;
                             signal.removeEventListener("abort", abort_listener);
-                            resolve(value);
                         }
-                    },
+                    }, 300000);
 
-                    (error) => {
-                        if (!settled) {
-                            settled = true;
-                            signal.removeEventListener("abort", abort_listener);
-                            reject(error);
+                    promise.then(
+                        (value) => {
+                            if (!settled) {
+                                settled = true;
+                                clearTimeout(timeout);
+                                resolve(value);
+                            }
+                        },
+
+                        (error) => {
+                            if (!settled) {
+                                settled = true;
+                                clearTimeout(timeout);
+                                reject(error);
+                            }
                         }
-                    }
-                );
-            });
-        };
-
-        const merge_signals = (a, b) => {
-            if (!a && !b) {
-                return undefined;
-            }
-
-            if (!a) {
-                return b;
-            }
-
-            if (!b) {
-                return a;
-            }
-
-            if (AbortSignal.any) {
-                return AbortSignal.any([a, b]);
-            }
-
-            const controller = new AbortController();
-
-            const abort = (signal) => {
-                if (controller.signal.aborted) {
-                    return;
-                }
-
-                controller.abort(signal.reason);
+                    );
+                });
             };
 
-            a.addEventListener("abort", () => abort(a), { once: true });
-            b.addEventListener("abort", () => abort(b), { once: true });
+            const merge_signals = (a, b) => {
+                if (!a && !b) {
+                    return undefined;
+                }
 
-            return controller.signal;
-        }
+                if (!a) {
+                    return b;
+                }
 
-        const jitter = (ms) => ms * (0.8 + Math.random() * 0.4);
-        const max_attempts = Math.min(retries + 1, 51);
-        const is_dev = typeof process !== "undefined" && process.env?.NODE_ENV !== "production";
+                if (!b) {
+                    return a;
+                }
 
-        for (let attempt = 1; attempt <= max_attempts; attempt++) {
-            this._inc("asyncguardjs.attempt", { attempt });
+                if (AbortSignal.any) {
+                    return AbortSignal.any([a, b]);
+                }
 
-            if (signal?.aborted) {
-                throw new AsyncGuardJS(
-                    "[!] [AsyncGuardJS] Operation Aborted Before Start",
-                    { attempt: 0 }
-                );
+                const controller = new AbortController();
+
+                const abort = (signal) => {
+                    if (controller.signal.aborted) {
+                        return;
+                    }
+
+                    controller.abort(signal.reason);
+                };
+
+                a.addEventListener("abort", () => abort(a), { once: true });
+                b.addEventListener("abort", () => abort(b), { once: true });
+
+                return controller.signal;
             }
 
-            const timeout_controller = timeout ? new AbortController() : null;
-            let timeout_id = null;
+            const jitter = (ms) => ms * (0.8 + Math.random() * 0.4);
+            const max_attempts = Math.min(retries + 1, 51);
+            const is_dev = typeof process !== "undefined" && process.env?.NODE_ENV !== "production";
 
-            if (timeout_controller) {
-                timeout_id = setTimeout(() => {
-                    timeout_controller.abort(
-                        new Error(`[!] [AsyncGuardJS] Operation Timed Out After '${timeout}' MS.`)
-                    );
-                }, timeout);
-            }
+            for (let attempt = 1; attempt <= max_attempts; attempt++) {
+                this._inc("asyncguardjs.attempt", { attempt });
 
-            const combined_signal = merge_signals(signal, timeout_controller?.signal);
-
-            const context = Object.freeze({
-                attempt,
-                signal: combined_signal,
-                timeout
-            });
-
-            try {
-                const start = this._has_performance ? performance.now() : Date.now();
-
-                const result = await enforce_abort(
-                    task(context),
-                    combined_signal,
-                    attempt
-                );
-
-                if (timeout_id) {
-                    clearTimeout(timeout_id);
-                }
-
-                if (circuit_breaker) {
-                    this._record_success(circuit_breaker);
-                }
-
-                if (this._has_performance) {
-                    this._observe(
-                        "asyncguardjs.task.duration_ms",
-                        performance.now() - start,
-                        { attempt }
-                    );
-                } else {
-                    this._observe(
-                        "asyncguardjs.task.duration_ms",
-                        Date.now() - start,
-                        { attempt }
+                if (signal?.aborted) {
+                    throw new AsyncGuardJS(
+                        "[!] [AsyncGuardJS] Operation Aborted Before Start",
+                        { attempt: 0 }
                     );
                 }
 
-                return result;
-            } catch (error) {
-                if (timeout_id) {
-                    clearTimeout(timeout_id);
+                const timeout_controller = timeout ? new AbortController() : null;
+                let timeout_id = null;
+
+                if (timeout_controller) {
+                    timeout_id = setTimeout(() => {
+                        timeout_controller.abort(
+                            new Error(`[!] [AsyncGuardJS] Operation Timed Out After '${timeout}' MS.`)
+                        );
+                    }, timeout);
                 }
 
-                this._inc("asyncguardjs.failure", {
+                const combined_signal = merge_signals(signal, timeout_controller?.signal);
+
+                const context = Object.freeze({
                     attempt,
-                    aborted: Boolean(combined_signal?.aborted)
+                    signal: combined_signal,
+                    timeout
                 });
 
-                const is_aborted = combined_signal?.aborted; // Est-ce que l'opération a été annulée ?
-                const is_last_attempt = attempt >= max_attempts;
-                let should_retry = false;
+                try {
+                    const start = this._has_performance ? performance.now() : Date.now();
 
-                if (!is_aborted && !is_last_attempt) {
-                    try {
-                        should_retry = Boolean(await Promise.race([
-                            retry_if(error, context),
-
-                            new Promise((_, reject) =>
-                                setTimeout(() => reject(new Error("'retry_if' Timeout")), 5000)
-                            )
-                        ]));
-                    } catch {
-                        should_retry = false;
-                    }
-                }
-
-                if (is_aborted || is_last_attempt || !should_retry) {
-                    let message = error?.message || "Async Failure";
-
-                    if (is_aborted) {
-                        const reason = combined_signal.reason;
-
-                        if (reason instanceof Error) {
-                            message = reason.message;
-                        } else if (reason) {
-                            message = String(reason);
-                        } else {
-                            message = "[!] [AsyncGuardJS] Operation Aborted";
-                        }
-                    }
-
-                    const wrapped_error = new AsyncGuardJS(message, {
-                        cause: error,
-                        context,
+                    const result = await enforce_abort(
+                        task(context),
+                        combined_signal,
                         attempt
-                    });
+                    );
 
-                    if (is_dev && !(error instanceof AsyncGuardJS) && error instanceof Error && error.stack) {
-                        wrapped_error.stack += `\nCaused By:\n${error.stack}`;
+                    if (timeout_id) {
+                        clearTimeout(timeout_id);
                     }
 
                     if (circuit_breaker) {
-                        this._record_failure(circuit_breaker);
+                        this._record_success(circuit_breaker);
                     }
 
-                    if (fallback) {
+                    if (this._has_performance) {
+                        this._observe(
+                            "asyncguardjs.task.duration_ms",
+                            performance.now() - start,
+                            { attempt }
+                        );
+                    } else {
+                        this._observe(
+                            "asyncguardjs.task.duration_ms",
+                            Date.now() - start,
+                            { attempt }
+                        );
+                    }
+
+                    return result;
+                } catch (error) {
+                    if (timeout_id) {
+                        clearTimeout(timeout_id);
+                    }
+
+                    this._inc("asyncguardjs.failure", {
+                        attempt,
+                        aborted: Boolean(combined_signal?.aborted)
+                    });
+
+                    const is_aborted = combined_signal?.aborted; // Est-ce que l'opération a été annulée ?
+                    const is_last_attempt = attempt >= max_attempts;
+                    let should_retry = false;
+
+                    if (!is_aborted && !is_last_attempt) {
                         try {
-                            const fallback_result = typeof fallback === "function"
-                                ? await fallback()
-                                : fallback;
+                            const retry_if_timeout = parse_safe_number(options.retry_if_timeout, 5000, 100, 30000);
+                            const _jittered_timeout = retry_if_timeout * (0.9 + Math.random() * 0.2);
 
-                            this._inc("asyncguardjs.fallback.used", {
-                                reason: is_aborted ? "aborted" : "exhausted"
-                            });
+                            should_retry = Boolean(await Promise.race([
+                                retry_if(error, context),
 
-                            return fallback_result;
-                        } catch (fallback_error) {
-                            this._inc("asyncguardjs.fallback.failed", {});
-
-                            const final_error = new AsyncGuardJS(
-                                "[!] [AsyncGuardJS] Fallback Failed After Exhausting All Retries",
-                                {
-                                    cause: fallback_error,
-                                    original_error: wrapped_error,
-                                    fallback_error,
-                                    attempt,
-                                    context
-                                }
-                            );
-
-                            if (is_dev) {
-                                if (wrapped_error?.stack) {
-                                    final_error.stack += `\n\n[Original Task Error]\n${wrapped_error.stack}`;
-                                }
-
-                                if (fallback_error?.stack) {
-                                    final_error.stack += `\n\n[Fallback Error]\n${fallback_error.stack}`;
-                                }
-                            }
-
-                            throw final_error;
+                                new Promise((_, reject) =>
+                                    setTimeout(() => reject(new Error("'retry_if' Timeout")), _jittered_timeout)
+                                )
+                            ]));
+                        } catch {
+                            should_retry = false;
                         }
                     }
 
-                    throw wrapped_error;
-                }
+                    if (is_aborted || is_last_attempt || !should_retry) {
+                        let message = error?.message || "Async Failure";
 
-                this._inc("asyncguardjs.retry", { attempt });
+                        if (is_aborted) {
+                            const reason = combined_signal.reason;
 
-                let base_delay = 0;
+                            if (reason instanceof Error) {
+                                message = reason.message;
+                            } else if (reason) {
+                                message = String(reason);
+                            } else {
+                                message = "[!] [AsyncGuardJS] Operation Aborted";
+                            }
+                        }
 
-                try {
-                    base_delay = Number(backoff(attempt)) || 0;
+                        const wrapped_error = new AsyncGuardJS(message, {
+                            cause: error,
+                            context,
+                            attempt
+                        });
 
-                    if (!isFinite(base_delay) || base_delay < 0) {
-                        base_delay = 100 * 2 ** (attempt - 1);
+                        if (is_dev && !(error instanceof AsyncGuardJS) && error instanceof Error && error.stack) {
+                            wrapped_error.stack += `\nCaused By:\n${error.stack}`;
+                        }
+
+                        if (circuit_breaker) {
+                            this._record_failure(circuit_breaker);
+                        }
+
+                        if (fallback) {
+                            try {
+                                const fallback_result = typeof fallback === "function"
+                                    ? await fallback()
+                                    : fallback;
+
+                                this._inc("asyncguardjs.fallback.used", {
+                                    reason: is_aborted ? "aborted" : "exhausted"
+                                });
+
+                                return fallback_result;
+                            } catch (fallback_error) {
+                                this._inc("asyncguardjs.fallback.failed", {});
+
+                                const final_error = new AsyncGuardJS(
+                                    "[!] [AsyncGuardJS] Fallback Failed After Exhausting All Retries",
+                                    {
+                                        cause: fallback_error,
+                                        original_error: wrapped_error,
+                                        fallback_error,
+                                        attempt,
+                                        context
+                                    }
+                                );
+
+                                if (is_dev) {
+                                    if (wrapped_error?.stack) {
+                                        final_error.stack += `\n\n[Original Task Error]\n${wrapped_error.stack}`;
+                                    }
+
+                                    if (fallback_error?.stack) {
+                                        final_error.stack += `\n\n[Fallback Error]\n${fallback_error.stack}`;
+                                    }
+                                }
+
+                                throw final_error;
+                            }
+                        }
+
+                        throw wrapped_error;
                     }
-                } catch {
-                    base_delay = 100 * 2 ** (attempt - 1); // Fallback !!
-                }
 
-                const delay = Math.min(max_backoff, jitter(base_delay));
+                    this._inc("asyncguardjs.retry", { attempt });
 
-                if (delay > 0) {
-                    await wait_with_abort(delay, context);
+                    let base_delay = 0;
+
+                    try {
+                        base_delay = Number(backoff(attempt)) || 0;
+
+                        if (!isFinite(base_delay) || base_delay < 0) {
+                            base_delay = Math.min(max_backoff, 100 * Math.pow(2, Math.min(attempt - 1, 10)));
+                        }
+                    } catch {
+                        base_delay = Math.min(max_backoff, 100 * Math.pow(2, Math.min(attempt - 1, 10))); // Fallback !!
+                    }
+
+                    const delay = Math.min(max_backoff, jitter(base_delay));
+
+                    if (delay > 0) {
+                        await wait_with_abort(delay, context);
+                    }
                 }
             }
+        } finally {
+            this._active_operations--;
         }
     }
 
@@ -407,12 +471,16 @@ export class AsyncGuardJS extends Error {
     static _max_rate_limiters = 1000;
     static _max_metric_keys = 2000;
 
+    static _circuit_access_order = [];
+
     static _maybe_cleanup_circuits() {
         if (this._circuits.size >= this._max_circuits) {
-            const first_key = this._circuits.keys().next().value;
+            const lru_key = this._circuit_access_order.shift();
 
-            this._circuits.delete(first_key);
-            this._inc("asyncguardjs.circuit.evicted", { name: first_key });
+            if (lru_key) {
+                this._circuits.delete(lru_key);
+                this._inc("asyncguardjs.circuit.evicted", { name: lru_key });
+            }
         }
     }
 
@@ -422,15 +490,29 @@ export class AsyncGuardJS extends Error {
     };
 
     static _get_rate_limit_key(configuration) {
-        return configuration.name || "__default__";
+        const name = this._sanitize_name(configuration.name);
+        const key = name || "__default__";
+
+        const index = this._rate_limiter_access_order.indexOf(key);
+
+        if (index !== -1) {
+            this._rate_limiter_access_order.splice(index, 1);
+        }
+
+        this._rate_limiter_access_order.push(key);
+        return key;
     }
+
+    static _rate_limiter_access_order = [];
 
     static _maybe_cleanup_rate_limiters() {
         if (this._rate_limiters.size >= this._max_rate_limiters) {
-            const first_key = this._rate_limiters.keys().next().value;
+            const lru_key = this._rate_limiter_access_order.shift();
 
-            this._rate_limiters.delete(first_key);
-            this._inc("asyncguardjs.ratelimit.evicted", { name: first_key });
+            if (lru_key) {
+                this._rate_limiters.delete(lru_key);
+                this._inc("asyncguardjs.ratelimit.evicted", { name: lru_key });
+            }
         }
     }
 
@@ -444,16 +526,21 @@ export class AsyncGuardJS extends Error {
         let limiter = this._rate_limiters.get(key);
 
         if (!limiter) {
-            limiter = { requests: [] };
+            limiter = {
+                requests: [],
+
+                configuration: {
+                    max_requests: configuration.max_requests,
+                    window_ms: configuration.window_ms
+                }
+            };
+
             this._rate_limiters.set(key, limiter);
         }
 
         const cutoff = now - window_ms;
 
-        while (limiter.requests.length > 0 && limiter.requests[0] < cutoff) {
-            limiter.requests.shift();
-        }
-
+        limiter.requests = limiter.requests.filter(timestamp => timestamp >= cutoff);
         const max_requests = configuration.max_requests || 10;
 
         if (limiter.requests.length >= max_requests) {
@@ -480,6 +567,13 @@ export class AsyncGuardJS extends Error {
         limiter.requests.push(now);
     }
 
+    static _jittered_delay(base_ms) {
+        const spread = base_ms * (0.7 + Math.random() * 0.6);
+        const extra_stagger = Math.random() * 200;
+
+        return Math.round(spread + extra_stagger);
+    }
+
     static async _wait_for_rate_limit(configuration, signal) {
         if (!configuration.queue) {
             throw new AsyncGuardJS(
@@ -490,32 +584,58 @@ export class AsyncGuardJS extends Error {
 
         const key = this._get_rate_limit_key(configuration);
         const limiter = this._rate_limiters.get(key);
-        const now = Date.now();
-        const window_ms = configuration.window_ms || 1000;
 
-        const oldest = limiter.requests[0];
-        const wait_ms = oldest ? (oldest + window_ms - now) : 0;
-
-        if (wait_ms > 0) {
-            this._inc("asyncguardjs.ratelimit.queued", {
-                name: configuration.name || "__default__"
-            });
-
-            await new Promise((resolve, reject) => {
-                if (signal?.aborted) {
-                    return reject(new AsyncGuardJS("[!] [AsyncGuardJS] Aborted While Queued", {}));
-                }
-
-                const timeout_id = setTimeout(resolve, wait_ms);
-
-                if (signal) {
-                    signal.addEventListener("abort", () => {
-                        clearTimeout(timeout_id);
-                        reject(new AsyncGuardJS("[!] [AsyncGuardJS] Aborted While Queued", {}));
-                    }, { once: true });
-                }
-            });
+        if (!limiter) {
+            return;
         }
+
+        const now = Date.now();
+        const effective_configuration = limiter.configuration || configuration;
+        const window_ms = effective_configuration.window_ms;
+        let wait_ms = 0;
+
+        if (limiter.requests.length > 0) {
+            const oldest = limiter.requests[0];
+            wait_ms = Math.max(0, oldest + window_ms - now);
+        }
+
+        if (wait_ms <= 0) {
+            return;
+        }
+
+        const effective_wait = this._jittered_delay(wait_ms);
+
+        this._inc("asyncguardjs.ratelimit.queued", {
+            name: configuration.name || "__default__",
+            original_wait_ms: wait_ms,
+            effective_wait_ms: effective_wait
+        });
+
+        const max_wait = configuration.queue_max_wait_ms || 30000;
+
+        if (effective_wait > max_wait) {
+            throw new AsyncGuardJS(
+                "[!] [AsyncGuardJS] Rate Limit Queue Timeout - Wait Too Long",
+                { rate_limit: true, waited_ms: effective_wait }
+            );
+        }
+
+        await new Promise((resolve, reject) => {
+            if (signal?.aborted) {
+                return reject(new AsyncGuardJS("[!] [AsyncGuardJS] Aborted While Queued.", {}));
+            }
+
+            const timeout_id = setTimeout(resolve, effective_wait);
+
+            if (signal) {
+                const abort_listener = () => {
+                    clearTimeout(timeout_id);
+                    reject(new AsyncGuardJS("[!] [AsyncGuardJS] Aborted While Queued.", {}));
+                };
+
+                signal.addEventListener("abort", abort_listener, { once: true });
+            }
+        });
     }
 
     /**
@@ -530,7 +650,14 @@ export class AsyncGuardJS extends Error {
     /**
      * Get rate limiter status
      * @param {string} [name="__default__"] 
-     * @returns {{ current_requests: number, window_ms: number, oldest_request: number | null } | null }
+     * @returns {{
+     * current_requests: number,
+     * capacity_remaining: number,
+     * oldest_request_timestamp: number | null,
+     * ms_until_next_slot: number,
+     * window_ms: number,
+     * is_at_limit: boolean
+     * } | null}
     */
 
     static get_rate_limit_status(name = "__default__") {
@@ -541,13 +668,33 @@ export class AsyncGuardJS extends Error {
         }
 
         const now = Date.now();
-        const oldest = limiter.requests[0];
+
+        const { max_requests, window_ms } = limiter.configuration || {
+            max_requests: 10,
+            window_ms: 1000
+        };
+
+        const cutoff = now - window_ms;
+        const requests = [...limiter.requests];
+
+        while (requests.length > 0 && requests[0] < cutoff) {
+            requests.shift();
+        }
+
+        const current = requests.length;
+        let ms_until_next = 0;
+
+        if (requests.length > 0) {
+            ms_until_next = Math.max(0, requests[0] + window_ms - now);
+        }
 
         return {
-            current_requests: limiter.requests.length,
-            oldest_request: oldest || null,
-            time_until_oldest_expires: oldest ? Math.max(0, oldest + 1000 - now) : 0,
-            is_full: false
+            current_requests: current,
+            capacity_remaining: Math.max(0, max_requests - current),
+            oldest_request_timestamp: requests[0] || null,
+            ms_until_next_slot: ms_until_next,
+            window_ms: window_ms,
+            is_at_limit: current >= max_requests
         };
     }
 
@@ -605,8 +752,34 @@ export class AsyncGuardJS extends Error {
         }
     }
 
+    static _sanitize_name(name) {
+        if (typeof name !== "string") {
+            return "__default__";
+        }
+
+        const sanitized = name.slice(0, 100);
+
+        return sanitized.replace(/[{}:,\n\r\t]/g, "_");
+    }
+
+    static _max_access_order_size = 10000;
+
     static _get_circuit_key(configuration) {
-        return configuration.name || "__default__";
+        const name = this._sanitize_name(configuration.name)
+        const key = name || "__default__";
+        const index = this._circuit_access_order.indexOf(key);
+
+        if (index !== -1) {
+            this._circuit_access_order.splice(index, 1);
+        }
+
+        this._circuit_access_order.push(key);
+
+        if (this._circuit_access_order.length > this._max_access_order_size) {
+            this._circuit_access_order.shift();
+        }
+
+        return key;
     }
 
     static _is_circuit_open(configuration) {

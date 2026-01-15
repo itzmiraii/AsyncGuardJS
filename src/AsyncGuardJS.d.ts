@@ -16,12 +16,14 @@ export type RateLimitConfig = {
     max_requests: number
     window_ms: number
     queue?: boolean
+    queue_max_wait_ms?: number
 }
 
 export type AsyncGuardOptions<T = unknown> = {
     retries?: number
     timeout?: number
     retry_if?: (error: unknown, context: AttemptContext) => boolean | Promise<boolean>
+    retry_if_timeout?: number
     backoff?: (attempt: number) => number
     max_backoff?: number
     signal?: AbortSignal
@@ -38,21 +40,20 @@ export type CircuitStatus = {
     opened_at: number | null
 }
 
-export type MetricLabels = Record<string, string | number | boolean>
-
-export type TimerStats = {
-    count: number,
-    min: number,
-    max: number,
-    avg: number,
-    p50: number,
-    p95: number,
-    p99: number
+export type RateLimitStatus = {
+    current_requests: number
+    capacity_remaining: number
+    oldest_request_timestamp: number | null
+    ms_until_next_slot: number
+    window_ms: number
+    is_at_limit: boolean
 }
+
+export type MetricLabels = Record<string, string | number | boolean>
 
 export type MetricsSnapshot = {
     counters: Record<string, number>
-    timers: Record<string, TimerStats>
+    timers: Record<string, number[]>  // Raw Measurements
 }
 
 export default class AsyncGuardJS extends Error {
@@ -64,6 +65,8 @@ export default class AsyncGuardJS extends Error {
     rate_limit?: boolean
     original_error?: Error
     fallback_error?: Error
+    active_operations?: number
+    waited_ms?: number
 
     constructor(message: string, meta?: Record<string, unknown>)
 
@@ -75,19 +78,21 @@ export default class AsyncGuardJS extends Error {
     static get_circuit_status(name?: string): CircuitStatus | null
     static reset_circuit(name?: string): void
 
-    static get_rate_limit_status(name?: string): {
-        current_requests: number
-        oldest_request: number | null
-        time_until_oldest_expires: number
-        is_full: boolean
-    } | null
-
+    static get_rate_limit_status(name?: string): RateLimitStatus | null
     static reset_rate_limit(name?: string): void
 
     /**
      * @experimental
+     * Get a snapshot of all AsyncGuardJS metrics.
     */
 
     static get_metrics(): MetricsSnapshot
+
+    /**
+     * @experimental
+     * Reset all AsyncGuardJS metrics (counters & timers).
+    */
+
     static reset_metrics(): void
+    static get_active_operations(): number
 }

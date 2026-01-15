@@ -40,6 +40,7 @@ const result = await AsyncGuardJS.run(
 AsyncGuardJS.run(task, {
     retries: 5,
     timeout: 3000,
+    retry_if_timeout: 5000,
 
     retry_if: (error, context) => {
         return error instanceof NetworkError && context.attempt < 3;
@@ -54,6 +55,7 @@ AsyncGuardJS.run(task, {
 > Timeouts are enforced per attempt.
 > Backoff supports jitter and hard caps.
 > `retry_if` may be async and is itself time-bounded.
+> `retry_if_timeout` (default: 5000) - Maximum time for the `if_retry` function to execute.
 
 ---
 
@@ -123,7 +125,8 @@ AsyncGuardJS.run(task, {
         name: "api",
         max_requests: 10,
         window_ms: 1000,
-        queue: true
+        queue: true,
+        queue_max_wait_ms: 30000
     }
 });
 ```
@@ -132,6 +135,7 @@ AsyncGuardJS.run(task, {
 > Requests are tracked in a sliding time window.
 > If `queue` is `false` (default), execution fails immediatly when the limit is reached.
 > If `queue` is `true`, execution waits until a slot becomes available.
+> NOTE: `queue_max_wait_ms` (default 30000) - Maximum time to wait in queue before throwing an error.
 
 NOTE: Queueing is **time-based**, not FIFO.
 
@@ -146,9 +150,11 @@ const status = AsyncGuardJS.get_rate_limit_status("api");
 ```js
 {
     current_requests: number,
-    oldest_request: number | null,
-    time_until_oldest_expires: number,
-    is_full: boolean
+    capacity_remaining: number,
+    oldest_request_timestamp: number | null,
+    ms_until_next_slot: number,
+    window_ms: number,
+    is_at_limit: boolean
 }
 ```
 
@@ -195,16 +201,7 @@ const metrics = AsyncGuardJS.get_metrics();
 ```js
 {
     counters: Record<string, number>,
-
-    timers: Record<string, {
-        count: number,
-        min: number,
-        max: number,
-        avg: number,
-        p50: number,
-        p95: number,
-        p99: number
-    }>
+    timers: Record<string, number[]>
 }
 ```
 
@@ -225,6 +222,9 @@ Public types includes:
 > `AsyncGuardOptions<T>`
 > `CircuitBreakerConfig`
 > `CircuitStatus`
+> `CircuitState`
+> `RateLimitConfig`
+> `RateLimitStatus`
 > `MetricsSnapshot`
 
 No additional configurations is required.
@@ -236,7 +236,7 @@ import AsyncGuardJS, { AttemptContext, AsyncGuardOptions } from "async-guard-js"
 
 type User = { id: number; name: string };
 
-const fetch_user = async ({ attempt, signal }: AttemptContext): Promise<user> => {
+const fetch_user = async ({ attempt, signal }: AttemptContext): Promise<User> => {
     console.log(`Attempt: #${attempt}`);
 
     const response = await fetch("api-url", { signal });
