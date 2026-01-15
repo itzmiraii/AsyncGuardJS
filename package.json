@@ -1,6 +1,6 @@
 {
   "name": "async-guard-js",
-  "version": "1.9.4",
+  "version": "1.9.5",
   "description": "AsyncGuardJS | Safely run async tasks with retries, timeouts, backoff & circuit breaker + fallback support ;)",
   "keywords": [
     "async",
