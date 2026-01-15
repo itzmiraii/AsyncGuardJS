@@ -55,7 +55,7 @@ AsyncGuardJS.run(task, {
 > Timeouts are enforced per attempt.
 > Backoff supports jitter and hard caps.
 > `retry_if` may be async and is itself time-bounded.
-> `retry_if_timeout` (default: 5000) - Maximum time for the `if_retry` function to execute.
+> `retry_if_timeout` (default: 5000) - Maximum time for the `retry_if` function to execute.
 
 ---
 
@@ -248,7 +248,7 @@ const fetch_user = async ({ attempt, signal }: AttemptContext): Promise<User> =>
     return response.json();
 };
 
-const options: AsyncGuardOptions<user> = {
+const options: AsyncGuardOptions<User> = {
     retries: 3,
     timeout: 5000,
     backoff: attempt => 200 * attempt,

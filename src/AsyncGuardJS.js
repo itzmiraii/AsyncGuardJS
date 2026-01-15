@@ -698,7 +698,9 @@ export class AsyncGuardJS extends Error {
         };
     }
 
-    static _inc(name, labels = {}) {
+    static _exporter = null;
+
+    static _inc(name, labels = {}, value = 1) {
         const key = this._get_metric_key(name, labels);
 
         if (this._metrics.counters.size >= this._max_metric_keys) {
@@ -709,8 +711,12 @@ export class AsyncGuardJS extends Error {
 
         this._metrics.counters.set(
             key,
-            (this._metrics.counters.get(key) || 0) + 1
+            (this._metrics.counters.get(key) || 0) + value
         );
+
+        if (this._exporter?.inc) {
+            this._exporter.inc(name, labels, value);
+        }
     }
 
     static _get_metric_key(name, labels = {}) {
@@ -728,6 +734,7 @@ export class AsyncGuardJS extends Error {
     }
 
     static _max_timer_values = 1000;
+    static _percentiles = [0.5, 0.9, 0.95, 0.99]
 
     static _observe(name, value, labels = {}) {
         const key = this._get_metric_key(name, labels);
@@ -750,6 +757,53 @@ export class AsyncGuardJS extends Error {
         while (arr.length > this._max_timer_values) {
             arr.shift();
         }
+
+        if (this._exporter?.observe) {
+            this._exporter.observe(name, labels, value);
+        }
+    }
+
+    static _parse_metric_key(key) {
+        const match = key.match(/^([^'{]+)(?:\{(.+)\})?$/);
+
+        if (!match) {
+            return { name: key, labels: {} };
+        }
+
+        const [, name, label_str] = match;
+        const labels = {};
+
+        if (label_str) {
+            label_str.split(",").forEach(part => {
+                const [k, v] = part.split(":");
+                labels[k] = v;
+            });
+        }
+
+        return { name, labels };
+    }
+
+    static _compute_timer_stats(values) {
+        if (values.length === 0) {
+            return { count: 0, sum: 0, min: 0, max: 0, mean: 0, percentiles: {} };
+        }
+
+        const sorted = [...values].sort((a, b) => a - b);
+        const count = sorted.length;
+        const sum = sorted.reduce((acc, v) => acc + v, 0);
+        const min = sorted[0];
+        const max = sorted[count - 1];
+        const mean = sum / count;
+        const percentiles = {};
+
+        this._percentiles.forEach(p => {
+            const idx = Math.max(0, Math.min(count - 1, Math.floor(p * count)));
+            const key = `p${Math.floor(p * 100)}`;
+
+            percentiles[key] = sorted[idx];
+        });
+
+        return { count, sum, min, max, mean, percentiles };
     }
 
     static _sanitize_name(name) {
@@ -887,13 +941,75 @@ export class AsyncGuardJS extends Error {
     */
 
     static get_metrics() {
-        return {
-            counters: Object.fromEntries(this._metrics.counters),
-            timers: Object.fromEntries(
-                Array.from(this._metrics.timers.entries())
-                    .map(([key, values]) => [key, [...values]])
-            )
-        };
+        if (format === "raw") {
+            return {
+                counters: Object.fromEntries(this._metrics.counters),
+                timers: Object.fromEntries(
+                    Array.from(this._metrics.timers.entries())
+                        .map(([key, values]) => [key, [...values]])
+                )
+            };
+        }
+
+        const grouped = { counters: {}, timers: {} };
+
+        for (const [key, value] of this._metrics.counters) {
+            const { name, labels } = this._parse_metric_key(key);
+
+            if (!grouped.counters[name]) {
+                grouped.counters[name] = [];
+            }
+
+            grouped.counters[name].push({ labels, value });
+        }
+
+        for (const [key, values] of this._metrics.timers) {
+            const { name, labels } = this._parse_metric_key(key);
+
+            if (!grouped.timers[name]) {
+                grouped.timers[name] = [];
+            }
+
+            const stats = this._compute_timer_stats(values);
+
+            grouped.timers[name].push({ labels, stats });
+        }
+
+        if (format === "json") {
+            return grouped;
+        }
+
+        if (format === "prometheus") {
+            let output = "";
+
+            for (const [name, entries] of Object.entries(grouped.counters)) {
+                output += `# TYPE ${name} counter\n`;
+
+                entries.forEach(({ labels, value }) => {
+                    const label_str = Object.entries(labels).map(([k, v]) => `${k}="${v}"`).join(",");
+                    output += `${name}{${label_str}} ${value}\n`;
+                });
+            }
+
+            for (const [name, entries] of Object.entries(grouped.timers)) {
+                output += `# TYPE ${name} summary\n`;
+
+                entries.forEach(({ labels, stats }) => {
+                    const label_str = Object.entries(labels).map(([k, v]) => `${k}="${v}"`).join(",");
+
+                    Object.entries(stats.percentiles).forEach(([p, val]) => {
+                        output += `${name}{${label_str},quantile="${p.replace('p', '0.')}" } ${val}\n`;
+                    });
+
+                    output += `${name}_sum{${label_str}} ${stats.sum}\n`;
+                    output += `${name}_count{${label_str}} ${stats.count}\n`;
+                });
+            }
+
+            return output;
+        }
+
+        throw new Error("[!] [AsyncGuardJS] Invalid Metrics Format !");
     }
 
     /**
@@ -904,6 +1020,14 @@ export class AsyncGuardJS extends Error {
     static reset_metrics() {
         this._metrics.counters.clear();
         this._metrics.timers.clear();
+    }
+
+    /**
+     * @param {{ inc?: (name: string, labels: object, value: number) => void, observe?: (name: string, labels: object, value: number) => void } | null} exporter
+    */
+
+    static set_exporter(exporter) {
+        this._exporter = exporter;
     }
 }
 
