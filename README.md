@@ -229,6 +229,35 @@ Public types includes:
 
 No additional configurations is required.
 
+### Example Usage
+
+```ts
+import AsyncGuardJS, { AttemptContext, AsyncGuardOptions } from "async-guard-js";
+
+type User = { id: number; name: string };
+
+const fetch_user = async ({ attempt, signal }: AttemptContext): Promise<user> => {
+    console.log(`Attempt: #${attempt}`);
+
+    const response = await fetch("api-url", { signal });
+
+    if (!response.ok) {
+        throw new Error("Failed To Fetch.");
+    }
+
+    return response.json();
+};
+
+const options: AsyncGuardOptions<user> = {
+    retries: 3,
+    timeout: 5000,
+    backoff: attempt => 200 * attempt,
+    fallback: { id: 0, name: "Fallback" }
+};
+
+console.log(await AsyncGuardJS.run(fetch_user, options));
+```
+
 ---
 
 ## Notes & Limitations

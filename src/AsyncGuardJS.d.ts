@@ -18,7 +18,7 @@ export type RateLimitConfig = {
     queue?: boolean
 }
 
-export type AsyncGuardOptions = {
+export type AsyncGuardOptions<T = unknown> = {
     retries?: number
     timeout?: number
     retry_if?: (error: unknown, context: AttemptContext) => boolean | Promise<boolean>
