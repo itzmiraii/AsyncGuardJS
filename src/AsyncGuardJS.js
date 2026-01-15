@@ -941,6 +941,10 @@ export class AsyncGuardJS extends Error {
     */
 
     static get_metrics(format) {
+        if (!format) {
+            format = "raw";
+        }
+
         if (format === "raw") {
             return {
                 counters: Object.fromEntries(this._metrics.counters),
