@@ -11,6 +11,13 @@ export type CircuitBreakerConfig = {
     recovery?: number
 }
 
+export type RateLimitConfig = {
+    name?: string
+    max_requests: number
+    window_ms: number
+    queue?: boolean
+}
+
 export type AsyncGuardOptions = {
     retries?: number
     timeout?: number
@@ -19,6 +26,7 @@ export type AsyncGuardOptions = {
     max_backoff?: number
     signal?: AbortSignal
     circuit_breaker?: CircuitBreakerConfig
+    rate_limit?: RateLimitConfig
     fallback?: T | (() => T | Promise<T>)
 }
 
@@ -53,6 +61,7 @@ export default class AsyncGuardJS extends Error {
     context?: AttemptContext
     attempt?: number
     circuit_state?: CircuitState
+    rate_limit?: boolean
 
     constructor(message: string, meta?: Record<string, unknown>)
 
@@ -63,6 +72,14 @@ export default class AsyncGuardJS extends Error {
 
     static get_circuit_status(name?: string): CircuitStatus | null
     static reset_circuit(name?: string): void
+
+    static get_rate_limit_status(name?: string): {
+        current_requests: number
+        oldest_request: number | null
+        queued: number
+    } | null
+
+    static reset_rate_limit(name?: string): void
 
     /**
      * @experimental

@@ -41,6 +41,7 @@ export class AsyncGuardJS extends Error {
             backoff = (attempt) => Math.min(5000, 100 * 2 ** (attempt - 1)),
             signal,
             circuit_breaker,
+            rate_limit,
             fallback
         } = options;
 
@@ -63,6 +64,24 @@ export class AsyncGuardJS extends Error {
                     "[!] [AsyncGuardJS] Circuit Breaker Is 'OPEN' | Too Many Recent Failures.",
                     { circuit_state: "OPEN", attempt: 0 }
                 );
+            }
+        }
+
+        if (rate_limit) {
+            if (typeof rate_limit !== "object") {
+                throw new TypeError("[!] [AsyncGuardJS] Rate Limit Configuration Must Be An Object !");
+            }
+
+            if (!Number.isInteger(rate_limit.max_requests) || rate_limit.max_requests < 1) {
+                throw new TypeError("[!] [AsyncGuardJS] Rate Limit 'max_requests' Must Be A Positive Integer !");
+            }
+
+            if (!Number.isInteger(rate_limit.window_ms) || rate_limit.window_ms < 1) {
+                throw new TypeError("[!] [AsyncGuardJS] Rate Limit 'window_ms' Must Be A Positive Integer !");
+            }
+
+            while (!this._check_rate_limit(rate_limit)) {
+                await this._wait_for_rate_limit(rate_limit, signal);
             }
         }
 
@@ -348,11 +367,112 @@ export class AsyncGuardJS extends Error {
     }
 
     static _circuits = new Map();
+    static _rate_limiters = new Map();
 
     static _metrics = {
         counters: new Map(),
         timers: new Map()
     };
+
+    static _get_rate_limit_key(configuration) {
+        return configuration.name || "__default__";
+    }
+
+    static _check_rate_limit(configuration) {
+        const key = this._get_rate_limit_key(configuration);
+        const now = Date.now();
+        const window_ms = configuration.window_ms || 1000;
+
+        let limiter = this._rate_limiters.get(key);
+
+        if (!limiter) {
+            limiter = { requests: [], queue: [] };
+            this._rate_limiters.set(key, limiter);
+        }
+
+        limiter.requests = limiter.requests.filter(time => now - time < window_ms);
+
+        const max_requests = configuration.max_requests || 10;
+
+        if (limiter.requests.length >= max_requests) {
+            this._inc("asyncguardjs.ratelimit.hit", {
+                name: configuration.name || "__default__"
+            });
+
+            return false;
+        }
+
+        limiter.requests.push(now);
+
+        return true;
+    }
+
+    static async _wait_for_rate_limit(configuration, signal) {
+        if (!configuration.queue) {
+            throw new AsyncGuardJS(
+                "[!] [AsyncGuardJS] Rate Limit Exceeded",
+                { rate_limit: true }
+            );
+        }
+
+        const key = this._get_rate_limit_key(configuration);
+        const limiter = this._rate_limiters.get(key);
+        const now = Date.now();
+        const window_ms = configuration.window_ms || 1000;
+
+        const oldest = limiter.requests[0];
+        const wait_ms = oldest ? (oldest + window_ms - now) : 0;
+
+        if (wait_ms > 0) {
+            this._inc("asyncguardjs.ratelimit.queued", {
+                name: configuration.name || "__default__"
+            });
+
+            await new Promise((resolve, reject) => {
+                if (signal?.aborted) {
+                    return reject(new AsyncGuardJS("[!] [AsyncGuardJS] Aborted While Queued", {}));
+                }
+
+                const timeout_id = setTimeout(resolve, wait_ms);
+
+                if (signal) {
+                    signal.addEventListener("abort", () => {
+                        clearTimeout(timeout_id);
+                        reject(new AsyncGuardJS("[!] [AsyncGuardJS] Aborted While Queued", {}));
+                    }, { once: true });
+                }
+            });
+        }
+    }
+
+    /**
+     * Reset rate limiter
+     * @param {string} [name="__default__"]
+    */
+
+    static reset_rate_limit(name = "__default__") {
+        this._rate_limiters.delete(name);
+    }
+
+    /**
+     * Get rate limiter status
+     * @param {string} [name="__default__"] 
+     * @returns {{ current_requests: number, window_ms: number, oldest_request: number | null } | null }
+    */
+
+    static get_rate_limit_status(name = "__default__") {
+        const limiter = this._rate_limiters.get(name);
+
+        if (!limiter) {
+            return null;
+        }
+
+        return {
+            current_requests: limiter.requests.length,
+            oldest_request: limiter.requests[0] || null,
+            queued: limiter.queue?.length || 0
+        };
+    }
 
     static _inc(name, labels = {}) {
         const key = this._get_metric_key(name, labels);
@@ -457,7 +577,7 @@ export class AsyncGuardJS extends Error {
     }
 
     /**
-     * @param {string} [name="__default__"] Circuit Breaker Name
+     * @param {string} [name="__default__"] Circuit breaker name
     */
 
     static reset_circuit(name = "__default__") {
@@ -465,7 +585,7 @@ export class AsyncGuardJS extends Error {
     }
 
     /**
-     * Get Circuit Braeker Status
+     * Get circuit breaker status
      * @param {string} [name="__default__"]
      * @returns {{state: string, failures: number} | null}
     */
