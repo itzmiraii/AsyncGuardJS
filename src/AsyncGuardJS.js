@@ -940,7 +940,7 @@ export class AsyncGuardJS extends Error {
      * @returns {{ counters: Record<string, number>, timers: Record<string, number[]> }}
     */
 
-    static get_metrics() {
+    static get_metrics(format) {
         if (format === "raw") {
             return {
                 counters: Object.fromEntries(this._metrics.counters),
