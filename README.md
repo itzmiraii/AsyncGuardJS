@@ -51,11 +51,11 @@ AsyncGuardJS.run(task, {
 });
 ```
 
-> Retries are bounded.
-> Timeouts are enforced per attempt.
-> Backoff supports jitter and hard caps.
-> `retry_if` may be async and is itself time-bounded.
-> `retry_if_timeout` (default: 5000) - Maximum time for the `retry_if` function to execute.
+- Retries are bounded.
+- Timeouts are enforced per attempt.
+- Backoff supports jitter and hard caps.
+- `retry_if` may be async and is itself time-bounded.
+- `retry_if_timeout` (default: 5000) - Maximum time for the `retry_if` function to execute.
 
 ---
 
@@ -87,9 +87,10 @@ AsyncGuardJS.run(task, {
 ```
 
 **Circuit states:**
-> `CLOSED` ~ Normal operation.
-> `OPEN` ~ Requests fail immediatly.
-> `HALF_OPEN` ~ Limited test execution after recovery.
+
+- `CLOSED` ~ Normal operation.
+- `OPEN` ~ Requests fail immediatly.
+- `HALF_OPEN` ~ Limited test execution after recovery.
 
 ### Circuit Status
 
@@ -132,10 +133,11 @@ AsyncGuardJS.run(task, {
 ```
 
 **Behavior:**
-> Requests are tracked in a sliding time window.
-> If `queue` is `false` (default), execution fails immediatly when the limit is reached.
-> If `queue` is `true`, execution waits until a slot becomes available.
-> NOTE: `queue_max_wait_ms` (default 30000) - Maximum time to wait in queue before throwing an error.
+
+- Requests are tracked in a sliding time window.
+- If `queue` is `false` (default), execution fails immediatly when the limit is reached.
+- If `queue` is `true`, execution waits until a slot becomes available.
+- NOTE: `queue_max_wait_ms` (default 30000) - Maximum time to wait in queue before throwing an error.
 
 NOTE: Queueing is **time-based**, not FIFO.
 
@@ -175,9 +177,10 @@ AsyncGuardJS.run(task, {
 ```
 
 **Behavior:**
-> If all attempts fail, the fallback is executed.
-> If the fallback succeeds, it's value is returned.
-> If the fallback fails, AsyncGuardJS throws an error containing:
+
+- If all attempts fail, the fallback is executed.
+- If the fallback succeeds, it's value is returned.
+- If the fallback fails, AsyncGuardJS throws an error containing:
     > The original error$
     > The fallback error
     > Execution context metadata
@@ -186,22 +189,49 @@ AsyncGuardJS.run(task, {
 
 ## Metrics **(EXPERIMENTAL)**
 
-AsyncGuardJS collects lightweight, in-memory metrics by default.
+AsyncGuardJS collects lightweight, in-memory metrics (counters & timers) during execution.
 
-> Metrics are process-local.
-> Nothing is exported or persisted automatically.
-> Metrics are only exposed when requested.
-
-```js
-const metrics = AsyncGuardJS.get_metrics();
-```
-
-**Returns:**
+- Metrics are process-local.
+- Nothing is exported or persisted automatically.
+- Metrics are only exposed when requested.
+- Timers automatically compute useful stats (min, max, mean, p50/p90/p95/p99).
+- Opt custom exporter hook for external systems (logs, Prometheus, StatsD, ect.).
+- Exposed on-demand via `get_metrics()`
 
 ```js
+const raw_metrics = AsyncGuardJS.get_metrics(); // -> { counters: {...}, timers: {... raw arrays} }
+const json_metrics = AsyncGuardJS.get_metrics("json");
+
+console.log(raw_metrics);
+console.log(json_metrics)
+
+// Json output example
 {
-    counters: Record<string, number>,
-    timers: Record<string, number[]>
+    counters: {
+        "asyncguardjs.attempt": [
+            { labels: { attempt: "1" }, value: 42 },
+            { labels: {}, value: 100 }
+        ],
+    },
+
+    timers: {
+        "asyncguardjs.task.duration_ms": [
+            {
+                labels: { attempt: "1" },
+
+                stats: {
+                    count: 42,
+                    sum: 8400,
+                    min: 50,
+                    max: 800,
+                    mean: 200,
+                    percentiles: { p50: 180, ... }
+                }
+            }
+
+            // ...
+        ]
+    }
 }
 ```
 
@@ -218,14 +248,14 @@ AsyncGuardJS.reset_metrics();
 AsyncGuardJS ships with first-class TypeScript definitions (`.d.ts`) included in the package.
 Public types includes:
 
-> `AttemptContext`
-> `AsyncGuardOptions<T>`
-> `CircuitBreakerConfig`
-> `CircuitStatus`
-> `CircuitState`
-> `RateLimitConfig`
-> `RateLimitStatus`
-> `MetricsSnapshot`
+- `AttemptContext`
+- `AsyncGuardOptions<T>`
+- `CircuitBreakerConfig`
+- `CircuitStatus`
+- `CircuitState`
+- `RateLimitConfig`
+- `RateLimitStatus`
+- `MetricsSnapshot`
 
 No additional configurations is required.
 
@@ -262,6 +292,7 @@ console.log(await AsyncGuardJS.run(fetch_user, options));
 
 ## Notes & Limitations
 
-> Circuit breakers, rate limiters, and metrics are **in-memory** & **process-local**.
-> This library does not coordinate state across multiple processes or servers.
-> No dependencies.
+- Metrics keys use Prom-like syntax internally (`name{label1:val1,...}`).
+- Circuit breakers, rate limiters, and metrics are **in-memory** & **process-local**.
+- This library does not coordinate state across multiple processes or servers.
+- No dependencies.
