@@ -62,6 +62,8 @@ export default class AsyncGuardJS extends Error {
     attempt?: number
     circuit_state?: CircuitState
     rate_limit?: boolean
+    original_error?: Error
+    fallback_error?: Error
 
     constructor(message: string, meta?: Record<string, unknown>)
 
@@ -76,7 +78,8 @@ export default class AsyncGuardJS extends Error {
     static get_rate_limit_status(name?: string): {
         current_requests: number
         oldest_request: number | null
-        queued: number
+        time_until_oldest_expires: number
+        is_full: boolean
     } | null
 
     static reset_rate_limit(name?: string): void

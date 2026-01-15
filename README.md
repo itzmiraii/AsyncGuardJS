@@ -1,300 +1,126 @@
-# Async-Guard-JS
+# async-guard-js
 
-### If there's any issues, please email me at <xamenia.officialhd@gmail.com>
-
----
 [![NPM](https://nodei.co/npm/async-guard-js.svg?style=flat-square&data=n,v,u,d,s)](https://nodei.co/npm/async-guard-js/)
 
-Use [npm](https://www.npmjs.com/) To Install
-
-```js
-npm install async-guard-js
-```
+A dependency-free utility to run async functions with retries, timeouts, cancellation,
+rate limiting, circuit breakers, fallbacks & lightweight metrics.
 
 ---
 
-## Quick Start
+## Installation
 
-```js
-import AsyncGuardJS from "./src/AsyncGuardJS.js";
-
-const unstable_api = async({ attempt, signal }) => {
-    const response = await fetch("", { signal }); // TEST API: https://thequoteshub.com/api/
-
-    if (!response.ok) {
-        throw new Error("API Error");
-    }
-
-    return response.json();
-};
-
-const result = await AsyncGuardJS.run(unstable_api, {
-    retries: 3,
-    timeout: 5000,
-    backoff: attempt => 1000 * attempt
-});
-
-console.log(result);
+```bash
+npm install async-guard-js@latest
 ```
-
----
-
-## Features
-
-- Automatic retries
-- Timeout control
-- Exponential backoff
-- Abort support
-- Circuit breaker (new)
-- Context tracking
-- Built-in metrics & monitoring
-- Zero-dependency
-- TS Support
-- Rate Limit
 
 ---
 
 ## Basic Usage
 
-Simple Retry
-
 ```js
-import AsyncGuardJS from "./src/AsyncGuardJS.js";
+import AsyncGuardJS from "async-guard-js";
 
-let attempt_count = 0;
+const result = await AsyncGuardJS.run(
+    async ({ attempt, signal, timeout }) => {
+        return fetch("api-url", { signal });
+    },
 
-const fetch_data = async ({ signal }) => {
-    attempt_count++;
-
-    await new Promise((resolve, reject) => {
-        const timeout_id = setTimeout(resolve, 500);
-
-        signal?.addEventListener("abort", () => {
-            clearTimeout(timeout_id);
-
-            reject(
-                new Error("Request Aborted")
-            );
-        }, { once: true });
-    });
-
-    if (attempt_count < 3) {
-        throw new Error("Temp Network Issue");
+    {
+        retries: 3,
+        timeout: 2000
     }
-
-    return { data: "Success" };
-}
-
-try {
-    const result = await AsyncGuardJS.run(fetch_data, {
-        retries: 5,
-        timeout: 1000,
-        backoff: attempt => 200 * attempt,
-        max_backoff: 1000,
-        retry_if: (error) => {
-            return error.message.includes("Network");
-        }
-    });
-
-    console.log(result);
-} catch (error) {
-    console.error(error);
-}
+);
 ```
 
 ---
 
-## Circuit Breaker (NEW)
-
-Prevent hammering failling services by automatically "opening" the circuit after too many failures
+## Retry & Timeout
 
 ```js
-await AsyncGuardJS.run(call_payment_api, {
-    retries: 2,
-    timeout: 5000,
-    
+AsyncGuardJS.run(task, {
+    retries: 5,
+    timeout: 3000,
+
+    retry_if: (error, context) => {
+        return error instanceof NetworkError && context.attempt < 3;
+    },
+
+    backoff: (attempt) => attempt * 200,
+    max_backoff: 2000
+});
+```
+
+> Retries are bounded.
+> Timeouts are enforced per attempt.
+> Backoff supports jitter and hard caps.
+> `retry_if` may be async and is itself time-bounded.
+
+---
+
+## AbortSignal Support
+
+```js
+const controller = new AbortController();
+
+AsyncGuardJS.run(task,  {
+    signal: controller.signal
+});
+```
+
+Abort signals are respected across retries & timeouts.
+
+---
+
+## Circuit Breaker
+
+```js
+AsyncGuardJS.run(task, {
     circuit_breaker: {
-        name: "payment-service",
+        name: "external-api",
         threshold: 5,
-        window: 60000,
-        recovery: 30000
+        window: 10000,
+        recovery: 5000
     }
-});
-
-const status = AsyncGuardJS.get_circuit_status("payment-service");
-
-console.log(status);
-// { state: "OPEN", failures: 5, opened_at: 1234567890 }
-
-// Manual Reset
-AsyncGuardJS.reset_circuit("payment-service");
-```
-
----
-
----
-
-## Fallback Mechanism
-
-Provide a graceful fallback when all retries are exhausted:
-
-```js
-// Static Fallback Value
-const user = await AsyncGuardJS.run(fetch_user, {
-    retries: 3,
-    timeout: 2000,
-    fallback: { id: null, name: "Guest" } // Returns default
-});
-
-// Fallback Function
-const data = await AsyncGuardJS.run(fetch_from_api, {
-    retries: 2,
-
-    fallback: async () => {
-        console.log("Primary failed, trying backup.");
-        return await fetch_from_backup_api();
-    }
-});
-
-// Returns Cachd Data
-const latest = await AsyncGuardJS.run(fetch_latest, {
-    retries: 3,
-    fallback: () => get_cached_data(),
-    circuit_breaker: { name: "api", threshold: 5 }
 });
 ```
 
-### **When is fallback used ?**
+**Circuit states:**
+> `CLOSED` ~ Normal operation.
+> `OPEN` ~ Requests fail immediatly.
+> `HALF_OPEN` ~ Limited test execution after recovery.
 
-- All retries exhausted
-- Circuit breaker is open
-- Operation aborted
-- Any terminal failure
-
-**Fallback Metrics:**
-
-- `asyncguardjs.fallback.used` ~ Successful fallback invocations
-- `asyncguardjs.fallback.failed` ~ Fallback function threw error
-
----
-
-## Metrics & Monitoring (Experimental)
-
-AsyncGuardJS exposes lightweifht, built-in metrics to help you understand
-retries, failures, latency and circuit breaker behaviors in production.
-Metrics are **optional**, **dependency-free**, and **disabled by default unless read**
-
-> **Note:** This API is experimental and may change in future versions.
-
-### What is collected
-
-#### Counters
-
-- `asyncguardjs.attempt` ~ Total execution attempts
-- `asyncguardjs.retry` ~ Number of retries performed
-- `asyncguardjs.failure` ~ Failed attempts (including aborted execs)
-- `asyncguardjs.circuit.open` ~ Circuit breaker opened events
-- `asyncguardjs.circuit.recovered` ~ Circuit breaker recovery events
-
-#### Timers
-
-- `asyncguardjs.task.duration_ms` ~ Execution duration of successful tasks (ms)
-
----
-
-### Reading Metrics
-
-Metrics are stored in-memory and can be accessed at any time:
+### Circuit Status
 
 ```js
-const metrics = AsyncGuardJS.get_metrics();
+const status = AsyncGuardJS.get_circuit_status("external-api");
+```
 
-console.log(metrics.counters);
-/*
+**Returns:**
+
+```js
 {
-    "asyncguardjs.attempt{'attempt': 1}": 3,
-    "asyncguardjs.retry{'attempt': 2}": 1,
-    "asyncguardjs.failure{'attempt': 1, 'aborted': false}": 2
+    state: "CLOSED" | "OPEN" | "HALF_OPEN",
+    failures: number,
+    opened_at: number | null
 }
-*/
+```
 
-console.log(metrics.timers);
-/*
-{
-    "asyncguardjs.task.duration_ms{'attempt': 1}": [120.3, 98.7]
-}
-*/
+Reset manually if needed
+
+```js
+AsyncGuardJS.reset_circuit("external-api");
 ```
 
 ---
 
----
+## Rate Limiting
 
-### Reseting Metrics
-
-```js
-AsyncGuardJS.reset_metrics();
-```
-
----
-
-### States
-
-- `CLOSED` ~ Normal Operation
-- `OPEN` ~ Too many failures, immediate rejection
-- `HALF_OPEN` ~ testing if recovered
-
-## Rate Limit
-
-Control request frequency to prevent overwhelming external APIs or services.
-AsyncGuardJS provides a sliding window rate limit with optional queueing.
-
-### Basic Rate Limit
+AsyncGuardJS provides an in-memory sliding-window rate limiter.
 
 ```js
-await AsyncGuardJS.run(call_api, {
-    retries: 2,
-
+AsyncGuardJS.run(task, {
     rate_limit: {
-        max_requests: 10,
-        window_ms: 1000
-    }
-});
-```
-
-### Queueing Requests
-
-Instead of throwing errors, queue requests until a slot becomes available:
-
-```js
-await AsyncGuardJS.run(fetch_data, {
-    rate_limit: {
-        name: "github-api",
-        max_requests: 5,
-        window_ms: 60000,
-        queue: true
-    }
-})
-```
-
-### Named Rate Limiters
-
-Use named rate limiters to track different services independently:
-
-```js
-// API A: 100 requests per minute
-await AsyncGuardJS.run(fetch_from_api_a, {
-    rate_limit: {
-        name: "api-a",
-        max_requests: 100,
-        window_ms: 60000
-    }
-});
-
-// API B: 10 requests per second (diff limit)
-await AsyncGuardJS.run(fetch_from_api_b, {
-    rate_limit: {
-        name: "api-b",
+        name: "api",
         max_requests: 10,
         window_ms: 1000,
         queue: true
@@ -302,121 +128,111 @@ await AsyncGuardJS.run(fetch_from_api_b, {
 });
 ```
 
-### Monitor Rate Limit Status
+**Behavior:**
+> Requests are tracked in a sliding time window.
+> If `queue` is `false` (default), execution fails immediatly when the limit is reached.
+> If `queue` is `true`, execution waits until a slot becomes available.
 
-Check current rate limit status for any named limiter:
+NOTE: Queueing is **time-based**, not FIFO.
+
+### Rate Limit Status
 
 ```js
-const status = AsyncGuardJS.get_rate_limit_status("github-api");
+const status = AsyncGuardJS.get_rate_limit_status("api");
+```
 
-console.log(status);
-/*
+**Returns:**
+
+```js
 {
-    current_requests: 3,
-    oldest_request: 123456789,
-    queued: 0
-}
-*/
-
-// Manual reset
-AsyncGuardJS.reset_rate_limit("github-api");
-```
-
-### Combined with Circuit Breaker
-
-Rate limiting works seamlessly with other features:
-
-```js
-await AsyncGuardJS.run(call_payment_api, {
-    retries: 3,
-    timeout: 5000,
-
-    rate_limit: {
-        name: "payment-api",
-        max_requests: 50,
-        window_ms: 60000,
-        queue: true
-    },
-
-    circuit_breaker: {
-        name: "payment-service",
-        threshold: 5,
-        window: 60000,
-        recovery: 30000
-    },
-
-    fallback: () => get_cached_payment_data()
-});
-```
-
-### Rate Limit Behavior
-
-**Without `queue: true` (Default):**
-
-- Throws `AsyncGuardJS` ~ error immediately when limit exceeded
-- Error includes `{ rate_limit: true }` metadata
-- Fast-fail behavior for strict rate enforcement
-
-**With `queue: true`:**
-
-- Automatically waits for the next available slot
-- Respects abort signals during wait
-- Calculates wait time based on oldest request in window
-
-### Rate Limit Metrics
-
-Rate limiting automatically tracks metrics:
-
-- `asyncguardjs.ratelimit.hit` ~ Times rate limit was reached
-- `asyncguardjs.ratelimit.queued` ~ Requests that waited in queue
-
-```js
-const metrics = AsyncGuardJS.get_metrics();
-
-console.log(metrics.counters);
-/*
-{
-    "asyncguardjs.ratelimit.hit{name:github-api}": 5,
-    "asyncguardjs.ratelimit.queued{name:github-api}": 2
-}
-*/
-```
-
-### Common Use Cases
-
-**API Rate Limits:**
-
-```js
-// Github API: 5000 requests/hour
-rate_limit: {
-    name: "github",
-    max_requests: 5000,
-    window_ms: 3600000,
-    queue: true
+    current_requests: number,
+    oldest_request: number | null,
+    time_until_oldest_expires: number,
+    is_full: boolean
 }
 ```
 
-**Database Connection Pool:**
+**Reset manually:**
 
 ```js
-// Max 20 concurrent queries
-rate_limit: {
-    name: "database-pool",
-    max_requests: 20,
-    window_ms: 100,
-    queue: true
-}
-```
-
-**User Actions:**
-
-```js
-// Prevent spam: 3 actions per 10 seconds
-rate_limit: {
-    name: "user-actions",
-    max_requests: 3,
-    window_ms: 10000
-}
+AsyncGuardJS.reset_rate_limit("api");
 ```
 
 ---
+
+## Fallbacks
+
+```js
+AsyncGuardJS.run(task, {
+    fallback: () => "default value"
+});
+```
+
+**Behavior:**
+> If all attempts fail, the fallback is executed.
+> If the fallback succeeds, it's value is returned.
+> If the fallback fails, AsyncGuardJS throws an error containing:
+    > The original error$
+    > The fallback error
+    > Execution context metadata
+
+---
+
+## Metrics **(EXPERIMENTAL)**
+
+AsyncGuardJS collects lightweight, in-memory metrics by default.
+
+> Metrics are process-local.
+> Nothing is exported or persisted automatically.
+> Metrics are only exposed when requested.
+
+```js
+const metrics = AsyncGuardJS.get_metrics();
+```
+
+**Returns:**
+
+```js
+{
+    counters: Record<string, number>,
+
+    timers: Record<string, {
+        count: number,
+        min: number,
+        max: number,
+        avg: number,
+        p50: number,
+        p95: number,
+        p99: number
+    }>
+}
+```
+
+**Reset metrics:**
+
+```js
+AsyncGuardJS.reset_metrics();
+```
+
+---
+
+## TypeScript Support
+
+AsyncGuardJS ships with first-class TypeScript definitions (`.d.ts`) included in the package.
+Public types includes:
+
+> `AttemptContext`
+> `AsyncGuardOptions<T>`
+> `CircuitBreakerConfig`
+> `CircuitStatus`
+> `MetricsSnapshot`
+
+No additional configurations is required.
+
+---
+
+## Notes & Limitations
+
+> Circuit breakers, rate limiters, and metrics are **in-memory** & **process-local**.
+> This library does not coordinate state across multiple processes or servers.
+> No dependencies.

@@ -23,6 +23,12 @@ export class AsyncGuardJS extends Error {
      * @param {number} [options.circuit_breaker.threshold=5] Failures Before Opening Circuit.
      * @param {number} [options.circuit_breaker.window=60000] Time Window For Failure Tracking (MS).
      * @param {number} [options.circuit_breaker.recovery=30000] Time To Wait Before Attempting Recovery (MS).
+     * 
+     * @param {Object} [options.rate_limit] Rate Limiter Config.
+     * @param {String} [options.rate_limit.name] Unique Name For Rate Limiter (Default: "__default__").
+     * @param {number} [options.rate_limit.max_requests] Max Requests Allowed In Window.
+     * @param {number} [options.rate_limit.window_ms] Time Window For Rate Limiting (MS).
+     * @param {number} [options.rate_limit.queue=false] Queue Requests When Limit Hit (Default: Throw Error).
     */
 
     static _has_performance = typeof performance !== "undefined" && typeof performance.now === "function";
@@ -80,7 +86,12 @@ export class AsyncGuardJS extends Error {
                 throw new TypeError("[!] [AsyncGuardJS] Rate Limit 'window_ms' Must Be A Positive Integer !");
             }
 
-            while (!this._check_rate_limit(rate_limit)) {
+            while (true) {
+                if (this._can_proceed_rate_limit(rate_limit)) {
+                    this._register_rate_limit_request(rate_limit);
+                    break;
+                }
+
                 await this._wait_for_rate_limit(rate_limit, signal);
             }
         }
@@ -337,6 +348,29 @@ export class AsyncGuardJS extends Error {
                             return fallback_result;
                         } catch (fallback_error) {
                             this._inc("asyncguardjs.fallback.failed", {});
+
+                            const final_error = new AsyncGuardJS(
+                                "[!] [AsyncGuardJS] Fallback Failed After Exhausting All Retries",
+                                {
+                                    cause: fallback_error,
+                                    original_error: wrapped_error,
+                                    fallback_error,
+                                    attempt,
+                                    context
+                                }
+                            );
+
+                            if (is_dev) {
+                                if (wrapped_error?.stack) {
+                                    final_error.stack += `\n\n[Original Task Error]\n${wrapped_error.stack}`;
+                                }
+
+                                if (fallback_error?.stack) {
+                                    final_error.stack += `\n\n[Fallback Error]\n${fallback_error.stack}`;
+                                }
+                            }
+
+                            throw final_error;
                         }
                     }
 
@@ -369,6 +403,19 @@ export class AsyncGuardJS extends Error {
     static _circuits = new Map();
     static _rate_limiters = new Map();
 
+    static _max_circuits = 1000;
+    static _max_rate_limiters = 1000;
+    static _max_metric_keys = 2000;
+
+    static _maybe_cleanup_circuits() {
+        if (this._circuits.size >= this._max_circuits) {
+            const first_key = this._circuits.keys().next().value;
+
+            this._circuits.delete(first_key);
+            this._inc("asyncguardjs.circuit.evicted", { name: first_key });
+        }
+    }
+
     static _metrics = {
         counters: new Map(),
         timers: new Map()
@@ -378,19 +425,34 @@ export class AsyncGuardJS extends Error {
         return configuration.name || "__default__";
     }
 
-    static _check_rate_limit(configuration) {
+    static _maybe_cleanup_rate_limiters() {
+        if (this._rate_limiters.size >= this._max_rate_limiters) {
+            const first_key = this._rate_limiters.keys().next().value;
+
+            this._rate_limiters.delete(first_key);
+            this._inc("asyncguardjs.ratelimit.evicted", { name: first_key });
+        }
+    }
+
+    static _can_proceed_rate_limit(configuration) {
         const key = this._get_rate_limit_key(configuration);
         const now = Date.now();
         const window_ms = configuration.window_ms || 1000;
 
+        this._maybe_cleanup_rate_limiters();
+
         let limiter = this._rate_limiters.get(key);
 
         if (!limiter) {
-            limiter = { requests: [], queue: [] };
+            limiter = { requests: [] };
             this._rate_limiters.set(key, limiter);
         }
 
-        limiter.requests = limiter.requests.filter(time => now - time < window_ms);
+        const cutoff = now - window_ms;
+
+        while (limiter.requests.length > 0 && limiter.requests[0] < cutoff) {
+            limiter.requests.shift();
+        }
 
         const max_requests = configuration.max_requests || 10;
 
@@ -402,9 +464,20 @@ export class AsyncGuardJS extends Error {
             return false;
         }
 
-        limiter.requests.push(now);
-
         return true;
+    }
+
+    static _register_rate_limit_request(configuration) {
+        const key = this._get_rate_limit_key(configuration);
+        const now = Date.now();
+        let limiter = this._rate_limiters.get(key);
+
+        if (!limiter) {
+            limiter = { requests: [] };
+            this._rate_limiters.set(key, limiter);
+        }
+
+        limiter.requests.push(now);
     }
 
     static async _wait_for_rate_limit(configuration, signal) {
@@ -467,15 +540,25 @@ export class AsyncGuardJS extends Error {
             return null;
         }
 
+        const now = Date.now();
+        const oldest = limiter.requests[0];
+
         return {
             current_requests: limiter.requests.length,
-            oldest_request: limiter.requests[0] || null,
-            queued: limiter.queue?.length || 0
+            oldest_request: oldest || null,
+            time_until_oldest_expires: oldest ? Math.max(0, oldest + 1000 - now) : 0,
+            is_full: false
         };
     }
 
     static _inc(name, labels = {}) {
         const key = this._get_metric_key(name, labels);
+
+        if (this._metrics.counters.size >= this._max_metric_keys) {
+            const first_key = this._metrics.counters.keys().next().value;
+
+            this._metrics.counters.delete(first_key);
+        }
 
         this._metrics.counters.set(
             key,
@@ -501,6 +584,13 @@ export class AsyncGuardJS extends Error {
 
     static _observe(name, value, labels = {}) {
         const key = this._get_metric_key(name, labels);
+
+        if (this._metrics.timers.size >= this._max_metric_keys) {
+            const first_key = this._metrics.timers.keys().next().value;
+
+            this._metrics.timers.delete(first_key);
+        }
+
         let arr = this._metrics.timers.get(key);
 
         if (!arr) {
@@ -552,6 +642,9 @@ export class AsyncGuardJS extends Error {
 
     static _record_failure(configuration) {
         const key = this._get_circuit_key(configuration);
+
+        this._maybe_cleanup_circuits();
+
         const now = Date.now();
         const threshold = configuration.threshold || 5;
         const window = configuration.window || 60000;
@@ -564,7 +657,12 @@ export class AsyncGuardJS extends Error {
         }
 
         circuit.failures.push(now);
-        circuit.failures = circuit.failures.filter(time => now - time < window);
+
+        const cutoff = now - window;
+
+        while (circuit.failures.length > 0 && circuit.failures[0] < cutoff) {
+            circuit.failures.shift();
+        }
 
         if (circuit.failures.length >= threshold && circuit.state === "CLOSED") {
             circuit.state = "OPEN";
